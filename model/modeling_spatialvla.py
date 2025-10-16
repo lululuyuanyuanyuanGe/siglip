@@ -31,7 +31,7 @@ from transformers.utils import (
 )
 from .configuration_spatialvla import SpatialVLAConfig
 from .modeling_gemma2 import Gemma2ForCausalLM
-from transformers import AutoModel, ZoeDepthForDepthEstimation
+from .modeling_mapanything import MapAnythingWrapper
 
 SIGLIP_MEAN, SIGLIP_STD = (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)
 ZOE_MEAN, ZOE_STD = (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)
@@ -100,8 +100,7 @@ class SpatialVLAForConditionalGeneration(SpatialVLAPreTrainedModel, GenerationMi
         if language_model._tied_weights_keys is not None:
             self._tied_weights_keys = [f"language_model.{k}" for k in language_model._tied_weights_keys]
         self.language_model = language_model
-
-        self.geometric_model = AutoModel.from_pretrained(config.map_anything_model_name_or_path, trust_remote_code=True)
+        self.geometric_model = MapAnythingWrapper(config)
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
 
 
@@ -192,6 +191,9 @@ class SpatialVLAForConditionalGeneration(SpatialVLAPreTrainedModel, GenerationMi
         siglip_pixel_values = TF.normalize(pixel_values, mean=SIGLIP_MEAN, std=SIGLIP_STD)
         image_outputs = self.vision_tower(siglip_pixel_values)
         selected_image_feature = image_outputs.last_hidden_state
+
+        # Geometric Branch (invoke the model, but do not use the output yet)
+        geometric_features = self.geometric_model(pixel_values=pixel_values, intrinsics=intrinsic).last_hidden_state
         image_features = self.multi_modal_projector(selected_image_feature)
         image_features = image_features / (self.config.text_config.hidden_size**0.5)
         return image_features

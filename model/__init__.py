@@ -25,6 +25,7 @@ else:
         "SpatialVLAForConditionalGeneration",
         "SpatialVLAPreTrainedModel",
     ]
+    _import_structure["modeling_mapanything"] = ["MapAnythingWrapper"]
     _import_structure["modeling_gemma2"] = ["Gemma2ForCausalLM"]
     _import_structure["processing_spatialvla"] = ["SpatialVLAProcessor"]
     _import_structure["action_tokenizer"] = ["SpatialActionTokenizer", "ActionTokenizer"]
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
         pass
     else:
         from .modeling_spatialvla import SpatialVLAForConditionalGeneration, SpatialVLAPreTrainedModel
+        from .modeling_mapanything import MapAnythingWrapper
         from .modeling_gemma2 import Gemma2ForCausalLM
         from .processing_spatialvla import SpatialVLAProcessor
         from .action_tokenizer import SpatialActionTokenizer, ActionTokenizer

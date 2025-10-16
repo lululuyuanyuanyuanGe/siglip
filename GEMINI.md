@@ -27,6 +27,10 @@ This dual-branch approach will provide the model with both the "what" (semantics
 3.  **Update Configuration (`model/configuration_spatialvla.py`):**
     *   The `SpatialVLAConfig` class will be modified to include new parameters for configuring the Map-Anything model (e.g., its Hugging Face model identifier).
 
+## Development Principles
+
+- **Transparency**: For every code modification or design decision, I will provide a clear and concise explanation of the 'what' and the 'why' to ensure our collaboration is transparent and avoids confusion.
+
 ## Building and Running
 
 ### Dependencies
