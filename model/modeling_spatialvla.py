@@ -38,77 +38,6 @@ ZOE_MEAN, ZOE_STD = (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)
 
 logger = logging.get_logger(__name__)
 
-class Ego3DPositionEmbeddingMLP(nn.Module):
-    """Absolute pos embedding, learned.
-    https://github.com/kwea123/nerf_pl/blob/52aeb387da64a9ad9a0f914ea9b049ffc598b20c/models/nerf.py#L4
-    """
-
-    def __init__(self, in_channels=3, num_pos_feats=768, n_freqs=8, logscale=True):
-        super(Ego3DPositionEmbeddingMLP, self).__init__()
-        self.n_freqs = n_freqs
-        self.freq_out_channels = in_channels * (2 * n_freqs + 1)
-        if logscale:
-            freq_bands = 2 ** torch.linspace(0, n_freqs - 1, n_freqs)
-        else:
-            freq_bands = torch.linspace(1, 2 ** (n_freqs - 1), n_freqs)
-        
-        center = torch.tensor([0., 0., 2.]).repeat(in_channels // 3)
-        self.register_buffer("freq_bands", freq_bands, persistent=False)
-        self.register_buffer("center", center, persistent=False)
-
-        self.position_embedding_head = nn.Sequential(
-            nn.Linear(self.freq_out_channels, num_pos_feats),
-            nn.LayerNorm(num_pos_feats),
-            nn.ReLU(),
-            nn.Linear(num_pos_feats, num_pos_feats),
-        )
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        """init with small weights to maintain stable training."""
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p, gain=0.01)
-
-    @torch.no_grad()
-    def frequency_encoding(self, xyz):
-        """
-        Embeds x to (x, sin(2^k x), cos(2^k x), ...)
-        Different from the paper, "x" is also in the output
-        See https://github.com/bmild/nerf/issues/12
-        x \in [-2, 2]
-        y \in [-2, 2]
-        z \in [0., 4]
-        Inputs:
-            x: (b n m)
-        Outputs:
-            out: (b n o)
-        """
-        xyz_n = ((xyz - self.center) / 2.0).to(self.freq_bands.dtype)
-        xyz_feq = xyz_n.unsqueeze(-1) * self.freq_bands  # (b n m 1)
-        sin_xyz, cos_xyz = torch.sin(xyz_feq), torch.cos(xyz_feq)  # (b n m nf)
-        encoding = torch.cat([xyz_n.unsqueeze(-1), sin_xyz, cos_xyz], -1).reshape(*xyz.shape[:2], -1)
-        return encoding
-
-    def forward(self, xyz):
-        """Forward pass, xyz is (B, N, 3or6), output (B, N, F)."""
-        freq_encoding = self.frequency_encoding(xyz)
-        position_embedding = self.position_embedding_head(freq_encoding)
-        return position_embedding
-
-def process_zoe(pixel_values, pad_mode="reflect", output_size=(384, 512)):
-    """https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/models/zoedepth/image_processing_zoedepth.py"""
-    # h, w = images.shape[-2:]
-    # pad
-    ph, pw = 31, 31  # int((h / 2)**0.5 * 3), int((w / 2)**0.5 * 3) # 32, 31
-    images = F.pad(pixel_values, (pw, pw, ph, ph), mode=pad_mode)
-    # resize
-    size = (384, 384)  # get_resize_output_image_size
-    images = F.interpolate(images, size=size, mode="bicubic", align_corners=True)
-    # zoe: padding -> resize -> nomalize. we follow `nomalize -> padding -> resize` from siglip
-    images = TF.normalize(images, mean=ZOE_MEAN, std=ZOE_STD)
-    return images, ph, pw
-
 @dataclass
 class SpatialVLACausalLMOutputWithPast(ModelOutput):
     loss: Optional[torch.FloatTensor] = None
@@ -131,7 +60,7 @@ class SpatialVLAPreTrainedModel(PreTrainedModel):
     config_class = SpatialVLAConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["SpatialVLAMultiModalProjector", "ZoeDepthForDepthEstimation", "Ego3DPositionEmbeddingMLP"]
+    _no_split_modules = ["SpatialVLAMultiModalProjector"]
     _skip_keys_device_placement = "past_key_values"
     _supports_cache_class = True
     _supports_quantized_cache = True
@@ -160,7 +89,7 @@ class SpatialVLAPreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 class SpatialVLAForConditionalGeneration(SpatialVLAPreTrainedModel, GenerationMixin):
-    def __init__(self, config: SpatialVLAConfig, vision_model=None, vision_zoe_model=None, projector_model=None, language_model=None):
+    def __init__(self, config: SpatialVLAConfig, vision_model=None, projector_model=None, language_model=None):
         super().__init__(config)
 
         self.vision_tower = vision_model or AutoModel.from_config(config=config.vision_config)
@@ -172,55 +101,9 @@ class SpatialVLAForConditionalGeneration(SpatialVLAPreTrainedModel, GenerationMi
             self._tied_weights_keys = [f"language_model.{k}" for k in language_model._tied_weights_keys]
         self.language_model = language_model
 
-        if config.use_vision_zoe:
-            self.vision_zoe_model = vision_zoe_model or ZoeDepthForDepthEstimation(config.vision_zoe_config)
-            self.position_embedding_3d = Ego3DPositionEmbeddingMLP(
-                config.ego3d_patch_reso**2 * 3, num_pos_feats=config.vision_config.hidden_size, n_freqs=config.n_freqs
-            )
-            # register buffer
-            patch_size, reso, image_size = config.vision_config.patch_size, config.ego3d_patch_reso, config.vision_config.image_size
-            y, x = torch.meshgrid(torch.arange(0, image_size, patch_size // reso), torch.arange(0, image_size, patch_size // reso), indexing="ij")  # (h//sp w//sp)
-            y, x = y + patch_size / reso / 2, x + patch_size / reso / 2
-            uv_h = torch.stack([x, y, torch.ones_like(x)], dim=0).reshape(3, -1)  # (3 hw)
-            self.register_buffer("uv_h", uv_h, persistent=False)
-
-        # shared spatial embeddings for <ACTION> <IMG>
-        if config.use_spatial_token:
-            self.spatial_embed_tokens = nn.Embedding(self.config.spatial_token_num, config.text_config.hidden_size)
-        else:
-            self.spatial_embed_tokens = None
+        self.geometric_model = AutoModel.from_pretrained(config.map_anything_model_name_or_path, trust_remote_code=True)
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
 
-
-    def backproject_patch(self, K: torch.Tensor, depth: torch.Tensor, patch_size=14, reso=2) -> torch.Tensor:
-        """
-        Backproject depth map to 3D points in camera coordinate.
-        Args:
-            K: camera intrinsic matrix (b 3 3)
-            depth: depth map (b 1 h w)
-            patch_size: patch size for siglip
-            reso: reso^2 -> sample points in each patch
-        patch sz = 14  ......          
-        ┌────────┬────────┐       
-        │ ─    ─ │ ─    ─ │       
-        │ points │        ├─ ─ ─ 
-        │ ─    ─ │ ─    ─ │       
-        ├────────┼────────┤       
-        │ ─    ─ │ ─    ─ │       
-        │        │        │       
-        │ ─    ─ │ ─    ─ │       
-        └────────┴────────┘       
-        reso=2───►points=4
-            │                    
-            │                        
-        """
-        b, c, h, w = depth.shape
-        hp, wp = h // patch_size, w // patch_size
-        sub_hp = sub_wp = reso
-        patch_depth = F.interpolate(depth, size=(hp * reso, wp * reso), mode="area").reshape(b, c, -1)
-        p_cam = (inv(K.float()) @ self.uv_h.float()) * patch_depth  # (b 3 3) @ (3 hw) -> (b 3 hw) * (b 1 hw) -> (b 3 hw)
-        patch_p_cam = p_cam.reshape(b, 3, hp, sub_hp, wp, sub_wp).permute(0, 2, 4, 3, 5, 1).reshape(b, hp * wp, -1)
-        return patch_p_cam
 
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
@@ -308,26 +191,7 @@ class SpatialVLAForConditionalGeneration(SpatialVLAPreTrainedModel, GenerationMi
     def get_image_features(self, pixel_values: torch.FloatTensor, intrinsic: torch.FloatTensor):
         siglip_pixel_values = TF.normalize(pixel_values, mean=SIGLIP_MEAN, std=SIGLIP_STD)
         image_outputs = self.vision_tower(siglip_pixel_values)
-
-        # ego3d position encoding
-        if self.config.use_vision_zoe:
-            zoe_pixel_values, ph, pw = process_zoe(pixel_values, pad_mode="reflect")
-            with torch.no_grad():
-                pvh, pvw = pixel_values.shape[-2:]
-                depth = self.vision_zoe_model(pixel_values=zoe_pixel_values).predicted_depth
-                depth = F.interpolate(
-                    depth.unsqueeze(1),
-                    size=(pvh+2*ph, pvw+2*pw),
-                    mode="bicubic",
-                    align_corners=True,
-                )[..., ph:-ph, pw:-pw]
-                xyz = self.backproject_patch(
-                    intrinsic, depth, patch_size=self.config.vision_config.patch_size, reso=self.config.ego3d_patch_reso
-                )  # (b, n, 3*4)
-            pos_embed_3d = self.position_embedding_3d(xyz)
-            selected_image_feature = image_outputs.last_hidden_state + pos_embed_3d
-        else:
-            selected_image_feature = image_outputs.last_hidden_state
+        selected_image_feature = image_outputs.last_hidden_state
         image_features = self.multi_modal_projector(selected_image_feature)
         image_features = image_features / (self.config.text_config.hidden_size**0.5)
         return image_features
@@ -359,10 +223,6 @@ class SpatialVLAForConditionalGeneration(SpatialVLAPreTrainedModel, GenerationMi
         is_training = token_type_ids is not None and labels is not None
         
         if inputs_embeds is None: inputs_embeds = self.get_input_embeddings()(input_ids).clone() # avoid checkpint grad True
-
-        if self.config.use_spatial_token:
-            spatial_selected = (input_ids >= self.config.action_token_begin_idx) & (input_ids < self.config.action_token_begin_idx + self.config.spatial_token_num)
-            inputs_embeds[spatial_selected] = inputs_embeds[spatial_selected] * 0.0 + self.spatial_embed_tokens(input_ids[spatial_selected] - self.config.action_token_begin_idx)
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0

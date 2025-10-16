@@ -21,7 +21,7 @@ logger = logging.get_logger(__name__)
 
 class SpatialVLAConfig(PretrainedConfig):
     model_type = "spatialvla"
-    sub_configs = {"text_config": AutoConfig, "vision_config": AutoConfig, "vision_zoe_config": AutoConfig}
+    sub_configs = {"text_config": AutoConfig, "vision_config": AutoConfig, "map_anything_config": AutoConfig}
 
     def __init__(
         self,
@@ -32,13 +32,8 @@ class SpatialVLAConfig(PretrainedConfig):
         vocab_size=257152,
         projection_dim=2048,
         hidden_size=2048,
-        vision_zoe_config=None,
+        map_anything_model_name_or_path=None,
         action_token_begin_idx=None,
-        spatial_token_num=259,
-        use_spatial_token=False,
-        ego3d_patch_reso=4,
-        n_freqs=8,
-        use_vision_zoe=True,
         **kwargs,
     ):
         self._ignore_index = ignore_index
@@ -46,6 +41,7 @@ class SpatialVLAConfig(PretrainedConfig):
         self._vocab_size = vocab_size
         self.projection_dim = projection_dim
         self.hidden_size = hidden_size
+        self.map_anything_model_name_or_path = map_anything_model_name_or_path
         self.vision_config = vision_config
         self.is_encoder_decoder = False
 
@@ -83,21 +79,8 @@ class SpatialVLAConfig(PretrainedConfig):
         self.text_config.num_image_tokens = (self.vision_config.image_size // self.vision_config.patch_size) ** 2
         self.vision_config.projection_dim = projection_dim
 
-        # vision zoe config
-        self.vision_zoe_config = vision_zoe_config
-        if isinstance(self.vision_zoe_config, dict):
-            vision_zoe_config["model_type"] = vision_zoe_config["model_type"] if "model_type" in vision_zoe_config else "zoedepth"
-            self.vision_zoe_config = CONFIG_MAPPING[vision_zoe_config["model_type"]](**vision_zoe_config)
-        else:
-            pass
-
         # additional attributes
         self.action_token_begin_idx = action_token_begin_idx
-        self.spatial_token_num = spatial_token_num
-        self.use_spatial_token = use_spatial_token
-        self.ego3d_patch_reso = ego3d_patch_reso
-        self.n_freqs = n_freqs
-        self.use_vision_zoe = use_vision_zoe
 
         super().__init__(**kwargs)
 

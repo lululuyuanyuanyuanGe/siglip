@@ -107,7 +107,7 @@ class SpatialVLAProcessor(ProcessorMixin):
         unnorm_key: Optional[str] = None,
         suffix_actions: Optional[np.array] = None, # (t e)
         **kwargs: Unpack[PaliGemmaProcessorKwargs],
-    ) -> BatchFeature:
+    ) -> BatchFeature: 
         images, text = _validate_images_text_input_order(images, text)
 
         output_kwargs = self._merge_kwargs(
